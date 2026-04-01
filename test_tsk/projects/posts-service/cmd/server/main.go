@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"posts-service/internal/graph"
 	"posts-service/internal/repository"
@@ -13,62 +17,81 @@ import (
 )
 
 func main() {
-	// Определяем тип хранилища
 	storage := os.Getenv("STORAGE")
 	if storage == "" {
 		storage = "memory"
-		log.Println("No STORAGE specified, using 'memory' as default")
+		log.Println("STORAGE not set, defaulting to 'memory'")
 	}
+	log.Printf("Starting with storage: %s", storage)
 
-	log.Printf("Starting server with storage: %s", storage)
-
-	// Создаём репозитории в зависимости от типа хранилища
-	var postRepo repository.PostRepository
-	var commentRepo repository.CommentRepository
+	var (
+		postRepo    repository.PostRepository
+		commentRepo repository.CommentRepository
+		closeFn     = func() {}
+	)
 
 	switch storage {
 	case "postgres":
 		connString := os.Getenv("DATABASE_URL")
 		if connString == "" {
 			connString = "postgresql://postgres@localhost:5432/postsdb?sslmode=disable"
-			log.Printf("No DATABASE_URL specified, using default: %s", connString)
+			log.Printf("DATABASE_URL not set, using default: %s", connString)
 		}
-
 		pgStore, err := repository.NewPostgresStore(connString)
 		if err != nil {
-			log.Fatalf("Failed to create postgres store: %v", err)
+			log.Fatalf("postgres: %v", err)
 		}
-		defer pgStore.Close()
-
 		postRepo = pgStore
 		commentRepo = pgStore
-		log.Println("PostgreSQL store connected")
+		closeFn = pgStore.Close
+		log.Println("PostgreSQL connected")
 
-	default: // memory
-		memoryStore := repository.NewMemoryStore()
-		postRepo = memoryStore
-		commentRepo = memoryStore
-		log.Println("Memory store created")
+	default:
+		mem := repository.NewMemoryStore()
+		postRepo = mem
+		commentRepo = mem
+		log.Println("Memory store ready")
 	}
+	defer closeFn()
 
-	// Создаём резолвер с репозиториями
 	resolver := graph.NewResolver(postRepo, commentRepo)
-
-	// Создаём GraphQL сервер
 	srv := handler.NewDefaultServer(
 		graph.NewExecutableSchema(graph.Config{Resolvers: resolver}),
 	)
 
-	// Настраиваем маршруты
-	http.Handle("/", playground.Handler("GraphQL playground", "/query"))
-	http.Handle("/query", srv)
+	mux := http.NewServeMux()
+	mux.Handle("/", playground.Handler("GraphQL playground", "/query"))
+	mux.Handle("/query", srv)
 
-	// Запускаем сервер
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	log.Printf("Server started on http://localhost:%s/ (storage: %s)", port, storage)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	httpSrv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      mux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	// Graceful shutdown
+	go func() {
+		quit := make(chan os.Signal, 1)
+		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+		<-quit
+		log.Println("Shutting down...")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := httpSrv.Shutdown(ctx); err != nil {
+			log.Printf("Shutdown error: %v", err)
+		}
+	}()
+
+	log.Printf("Server on http://localhost:%s/ (storage: %s)", port, storage)
+	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("Server error: %v", err)
+	}
+	log.Println("Server stopped")
 }

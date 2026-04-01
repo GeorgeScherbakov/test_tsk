@@ -2,39 +2,57 @@ package graph
 
 import (
 	"context"
+	"fmt"
+
 	"posts-service/internal/model"
 )
 
-// Replies is the resolver for the replies field.
+// ─── Comment ─────────────────────────────────────────────────────────────────
+
 func (r *commentResolver) Replies(ctx context.Context, obj *model.Comment, first *int, after *string) (*model.CommentConnection, error) {
 	limit := 10
-	if first != nil {
+	if first != nil && *first > 0 {
 		limit = *first
 	}
 	return r.CommentRepo.GetRepliesByParentID(ctx, obj.ID, limit, after)
 }
 
-// CreatedAt is the resolver for the createdAt field.
 func (r *commentResolver) CreatedAt(ctx context.Context, obj *model.Comment) (string, error) {
 	return obj.CreatedAt.Format("2006-01-02T15:04:05Z07:00"), nil
 }
 
-// CreatePost is the resolver for the createPost field.
+// ─── Mutation ────────────────────────────────────────────────────────────────
+
 func (r *mutationResolver) CreatePost(ctx context.Context, title string, content string, author string) (*model.Post, error) {
+	if title == "" {
+		return nil, fmt.Errorf("title cannot be empty")
+	}
+	if content == "" {
+		return nil, fmt.Errorf("content cannot be empty")
+	}
+	if author == "" {
+		return nil, fmt.Errorf("author cannot be empty")
+	}
+
 	post := &model.Post{
 		Title:   title,
 		Content: content,
 		Author:  author,
 	}
-	err := r.PostRepo.CreatePost(ctx, post)
-	if err != nil {
+	if err := r.PostRepo.CreatePost(ctx, post); err != nil {
 		return nil, err
 	}
 	return post, nil
 }
 
-// CreateComment is the resolver for the createComment field.
 func (r *mutationResolver) CreateComment(ctx context.Context, input model.CreateCommentInput) (*model.Comment, error) {
+	if input.Author == "" {
+		return nil, fmt.Errorf("author cannot be empty")
+	}
+	if input.Content == "" {
+		return nil, fmt.Errorf("content cannot be empty")
+	}
+
 	comment := &model.Comment{
 		PostID:   input.PostID,
 		ParentID: input.ParentID,
@@ -44,82 +62,56 @@ func (r *mutationResolver) CreateComment(ctx context.Context, input model.Create
 	return r.CommentRepo.CreateComment(ctx, comment)
 }
 
-// ToggleComments is the resolver for the toggleComments field.
 func (r *mutationResolver) ToggleComments(ctx context.Context, postID string, allowComments bool) (*model.Post, error) {
 	return r.PostRepo.ToggleComments(ctx, postID, allowComments)
 }
 
-// Comments is the resolver for the comments field.
+// ─── Post ────────────────────────────────────────────────────────────────────
+
 func (r *postResolver) Comments(ctx context.Context, obj *model.Post, first *int, after *string) (*model.CommentConnection, error) {
 	limit := 10
-	if first != nil {
+	if first != nil && *first > 0 {
 		limit = *first
 	}
 	return r.CommentRepo.GetCommentsByPostID(ctx, obj.ID, limit, after)
 }
 
-// CreatedAt is the resolver for the createdAt field.
 func (r *postResolver) CreatedAt(ctx context.Context, obj *model.Post) (string, error) {
 	return obj.CreatedAt.Format("2006-01-02T15:04:05Z07:00"), nil
 }
 
-// Posts is the resolver for the posts field.
+// ─── Query ───────────────────────────────────────────────────────────────────
+
 func (r *queryResolver) Posts(ctx context.Context, first *int, after *string) (*model.PostConnection, error) {
-	posts, err := r.PostRepo.GetPosts(ctx)
-	if err != nil {
-		return nil, err
+	limit := 10
+	if first != nil && *first > 0 {
+		limit = *first
 	}
-
-	edges := make([]*model.PostEdge, len(posts))
-	for i, p := range posts {
-		edges[i] = &model.PostEdge{
-			Node:   p,
-			Cursor: p.ID,
-		}
-	}
-
-	var endCursor *string
-	if len(edges) > 0 {
-		endCursor = &edges[len(edges)-1].Cursor
-	}
-
-	return &model.PostConnection{
-		Edges: edges,
-		PageInfo: &model.PageInfo{
-			HasNextPage: false,
-			EndCursor:   endCursor,
-		},
-		TotalCount: len(posts),
-	}, nil
+	return r.PostRepo.GetPosts(ctx, limit, after)
 }
 
-// Post is the resolver for the post field.
 func (r *queryResolver) Post(ctx context.Context, id string) (*model.Post, error) {
 	return r.PostRepo.GetPostByID(ctx, id)
 }
 
-// CommentAdded is the resolver for the commentAdded field.
+// ─── Subscription ────────────────────────────────────────────────────────────
+
+// CommentAdded подписывается на новые комментарии к посту.
+// Канал закрывается при отмене ctx (клиент отключился).
 func (r *subscriptionResolver) CommentAdded(ctx context.Context, postID string) (<-chan *model.Comment, error) {
-    return r.CommentRepo.Subscribe(ctx, postID)
+	return r.CommentRepo.Subscribe(ctx, postID)
 }
 
-// Comment returns CommentResolver implementation.
-func (r *Resolver) Comment() CommentResolver { return &commentResolver{r} }
+// ─── Resolver wiring ─────────────────────────────────────────────────────────
 
-// Mutation returns MutationResolver implementation.
-func (r *Resolver) Mutation() MutationResolver { return &mutationResolver{r} }
-
-// Post returns PostResolver implementation.
-func (r *Resolver) Post() PostResolver { return &postResolver{r} }
-
-// Query returns QueryResolver implementation.
-func (r *Resolver) Query() QueryResolver { return &queryResolver{r} }
-
-// Subscription returns SubscriptionResolver implementation.
+func (r *Resolver) Comment() CommentResolver          { return &commentResolver{r} }
+func (r *Resolver) Mutation() MutationResolver        { return &mutationResolver{r} }
+func (r *Resolver) Post() PostResolver                { return &postResolver{r} }
+func (r *Resolver) Query() QueryResolver              { return &queryResolver{r} }
 func (r *Resolver) Subscription() SubscriptionResolver { return &subscriptionResolver{r} }
 
-type commentResolver struct{ *Resolver }
-type mutationResolver struct{ *Resolver }
-type postResolver struct{ *Resolver }
-type queryResolver struct{ *Resolver }
+type commentResolver      struct{ *Resolver }
+type mutationResolver     struct{ *Resolver }
+type postResolver         struct{ *Resolver }
+type queryResolver        struct{ *Resolver }
 type subscriptionResolver struct{ *Resolver }
